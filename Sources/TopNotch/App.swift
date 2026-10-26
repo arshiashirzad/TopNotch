@@ -4,6 +4,7 @@ import SwiftUI
 @main @MainActor enum Main {
     static let delegate = AppDelegate()
     static func main() {
+        if CommandLine.arguments.contains("--hook") { Hook.client() }
         if CommandLine.arguments.contains("--selftest") { selftest(); return }
         let app = NSApplication.shared
         app.delegate = delegate
@@ -47,6 +48,9 @@ final class FirstClickHost<V: View>: NSHostingView<V> {
     let notifs = Notifs()
     let coach = Coach()
     let stats = Stats()
+    let bridge = Bridge()
+    var claudeStatusItem: NSStatusItem!
+    let claudePopover = NSPopover()
     var panel: NotchPanel!
     let side = Side()
     var sideWindow: NotchPanel!
@@ -68,7 +72,7 @@ final class FirstClickHost<V: View>: NSHostingView<V> {
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         panel.ignoresMouseEvents = true
         panel.becomesKeyOnlyIfNeeded = true  // only text fields grab the keyboard (and pin it open)
-        panel.contentView = FirstClickHost(rootView: NotchView(s: state, music: music, clip: clip, agents: agents, notifs: notifs, stats: stats))
+        panel.contentView = FirstClickHost(rootView: NotchView(s: state, music: music, clip: clip, agents: agents, notifs: notifs, stats: stats, bridge: bridge))
 
         // health reminders live in a liquid tab on the right screen edge, above the Dock
         sideWindow = NotchPanel(contentRect: .init(origin: .zero, size: Side.canvas),
@@ -83,6 +87,8 @@ final class FirstClickHost<V: View>: NSHostingView<V> {
         sideWindow.contentView = FirstClickHost(rootView: SideView(side: side, coach: coach))
         coach.canInterrupt = { [weak self] in self?.side.mode == .idle }
         coach.onDue = { [weak self] r in self?.remind(r) }
+
+        installClaudeStatusItem()
 
         place()
         panel.orderFrontRegardless()
@@ -113,8 +119,14 @@ final class FirstClickHost<V: View>: NSHostingView<V> {
         AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
         agents.onDone = { [weak self] name in
             NSSound(named: "Glass")?.play()
-            self?.ping(Flash(icon: "checkmark.seal.fill", color: .neon, app: "Claude Code", title: name,
-                             body: "done · your turn", tab: .agents, secs: 5))
+            self?.refreshClaudeStatusItem()
+        }
+        bridge.onAsk = { [weak self] _ in
+            NSSound(named: "Ping")?.play()
+            self?.refreshClaudeStatusItem()
+        }
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { if let self { self.bridge.discover(self.agents.live); self.refreshClaudeStatusItem() } }
         }
         stats.onEvent = { [weak self] f in self?.ping(f) }
         notifs.onNew = { [weak self] n in
@@ -126,6 +138,44 @@ final class FirstClickHost<V: View>: NSHostingView<V> {
 
         let ev = NSAppleEventManager.shared().currentAppleEvent
         if ev?.paramDescriptor(forKeyword: keyAELaunchedAsLogInItem)?.booleanValue != true { pin() }
+    }
+
+    private func installClaudeStatusItem() {
+        claudeStatusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = claudeStatusItem.button {
+            let image = NSImage(systemSymbolName: "chevron.left.forwardslash.chevron.right", accessibilityDescription: "Claude Code")
+            image?.isTemplate = true
+            button.image = image
+            button.target = self
+            button.action = #selector(toggleClaudePopover)
+            button.toolTip = "Claude Code sessions and approvals"
+        }
+        claudePopover.behavior = .transient
+        claudePopover.animates = true
+        claudePopover.contentSize = NSSize(width: 500, height: 680)
+        claudePopover.contentViewController = NSHostingController(rootView: ClaudeStatusPopover(agents: agents, bridge: bridge))
+        refreshClaudeStatusItem()
+    }
+
+    private func refreshClaudeStatusItem() {
+        guard let button = claudeStatusItem?.button else { return }
+        let waiting = bridge.asks.count
+        let running = agents.live.count
+        button.title = waiting > 0 ? " \(waiting)" : running > 0 ? " \(running)" : ""
+        button.contentTintColor = waiting > 0 ? .systemOrange : nil
+        button.toolTip = waiting > 0
+            ? "\(waiting) Claude Code request\(waiting == 1 ? "" : "s") waiting for you"
+            : "Claude Code · \(running) active session\(running == 1 ? "" : "s")"
+    }
+
+    @objc private func toggleClaudePopover() {
+        guard let button = claudeStatusItem.button else { return }
+        if claudePopover.isShown {
+            claudePopover.performClose(nil)
+        } else {
+            claudePopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     /// Opened from Finder/Launchpad/Spotlight, or clicked again while running.

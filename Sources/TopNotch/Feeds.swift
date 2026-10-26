@@ -206,6 +206,30 @@ enum AState: String { case run = "RUN", hold = "HOLD", think = "THNK", wait = "Y
 
 struct Agent: Identifiable {
     let id: String, project: String, state: AState, detail: String, updated: Date, subs: Int
+    var cwd: String?, model: String?, branch: String?
+    /// "cli", "claude-vscode", "claude-desktop", "sdk-ts"…: where the session was started from
+    var entry: String?
+    var ai = "Claude"
+}
+
+struct ModelTokenUsage: Identifiable {
+    let model: String
+    let tokens: Int
+    var id: String { model }
+}
+
+struct UsageWindow: Identifiable {
+    let id: String
+    let name: String
+    let percent: Double
+    let resetsAt: Date?
+}
+
+struct ExtraUsage {
+    let enabled: Bool
+    let used: Double?
+    let limit: Double?
+    let currency: String
 }
 
 @Observable final class Agents {
@@ -215,6 +239,14 @@ struct Agent: Identifiable {
     var peak = 1
     var week = 0
     var blockEnd: Date?
+    /// Last seven local calendar days, one row per day and one column per hour.
+    var activity = Array(repeating: Array(repeating: 0, count: 24), count: 7)
+    var modelUsage: [ModelTokenUsage] = []
+    var accountSession: UsageWindow?
+    var accountWeek: UsageWindow?
+    var accountModels: [UsageWindow] = []
+    var extraUsage: ExtraUsage?
+    var accountUsageLoaded = false
 
     @ObservationIgnored var onDone: ((String) -> Void)?
     @ObservationIgnored private var all: [Agent] = []
@@ -232,14 +264,16 @@ struct Agent: Identifiable {
         live = all.filter { a in dismissed[a.id].map { a.updated.timeIntervalSince1970 > $0 } ?? true }
     }
     @ObservationIgnored private var prev: [String: AState] = [:]
-    @ObservationIgnored private var cache: [String: (Date, [(String, Date, Int)])] = [:]  // q only
+    @ObservationIgnored private var cache: [String: (Date, [(String, Date, Int, String?)])] = [:]  // q only
     @ObservationIgnored private let q = DispatchQueue(label: "topnotch.agents", qos: .utility)
     static let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
 
     init() {
         Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.q.async { self?.scanLive() } }
         Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.q.async { self?.scanUsage() } }
+        Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.refreshAccountUsage() }
         q.async { self.scanLive(); self.scanUsage() }
+        refreshAccountUsage()
     }
 
     private func files(within s: TimeInterval) -> [(URL, Date)] {
@@ -257,7 +291,8 @@ struct Agent: Identifiable {
         let recent = files(within: 30 * 60)
         var out: [Agent] = []
         for (u, m) in recent where !u.path.contains("/subagents/") {
-            guard let (raw, detail, cwd) = Self.tail(u) else { continue }
+            guard let t = Self.tail(u) else { continue }
+            let (raw, detail, cwd) = (t.0, t.1, t.2)
             let age = Date().timeIntervalSince(m)
             let state: AState = raw == .run && age > 20 ? .hold : raw  // long tool, or waiting on your approval
             // only what's alive or waiting on you: a log that stopped mid-turn is a closed/crashed session
@@ -265,7 +300,8 @@ struct Agent: Identifiable {
             let subDir = u.deletingPathExtension().path + "/subagents/"
             let subs = recent.filter { $0.0.path.hasPrefix(subDir) && Date().timeIntervalSince($0.1) < 60 }.count
             let name = cwd.map { URL(fileURLWithPath: $0).lastPathComponent } ?? u.deletingLastPathComponent().lastPathComponent
-            out.append(Agent(id: u.path, project: name, state: state, detail: detail, updated: m, subs: subs))
+            out.append(Agent(id: u.path, project: name, state: state, detail: detail, updated: m, subs: subs,
+                             cwd: cwd, model: t.meta.model, branch: t.meta.branch, entry: t.meta.entry))
         }
         out.sort { $0.updated > $1.updated }
         DispatchQueue.main.async { [self] in
@@ -276,19 +312,23 @@ struct Agent: Identifiable {
         }
     }
 
-    /// Status from the last real message in the session log.
-    static func tail(_ u: URL) -> (AState, String, String?)? {
+    /// Status from the last real message in the session log, plus which model, branch and front end it's on.
+    static func tail(_ u: URL) -> (AState, String, String?, meta: (model: String?, branch: String?, entry: String?))? {
         guard let h = try? FileHandle(forReadingFrom: u) else { return nil }
         defer { try? h.close() }
         let size = (try? h.seekToEnd()) ?? 0
         try? h.seek(toOffset: size > 262_144 ? size - 262_144 : 0)
         guard let data = try? h.readToEnd(), let text = String(data: data, encoding: .utf8) else { return nil }
+        var found: (AState, String, String?)?, model: String?, branch: String?, entry: String?
         for line in text.split(separator: "\n").reversed() {
-            guard let d = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                  let s = status(d) else { continue }
-            return (s.0, clean(s.1), d["cwd"] as? String)
+            guard let d = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
+            branch = branch ?? (d["gitBranch"] as? String).flatMap { $0.isEmpty || $0 == "HEAD" ? nil : $0 }
+            entry = entry ?? d["entrypoint"] as? String
+            if model == nil, let m = (d["message"] as? [String: Any])?["model"] as? String, m.hasPrefix("claude") { model = m }
+            if found == nil, let s = status(d) { found = (s.0, clean(s.1), d["cwd"] as? String) }
+            if found != nil, model != nil, branch != nil, entry != nil { break }
         }
-        return nil
+        return found.map { ($0.0, $0.1, $0.2, (model, branch, entry)) }
     }
 
     static func status(_ d: [String: Any]) -> (AState, String)? {
@@ -322,21 +362,141 @@ struct Agent: Identifiable {
 
     // ponytail: re-parses a whole changed log every 30s; tail-offset caching if logs get huge.
     private func scanUsage() {
-        var all: [String: (Date, Int)] = [:]
+        var all: [String: (Date, Int, String?)] = [:]
         var per: [String: Int] = [:]
+        var models: [String: Int] = [:]
+        let weekCutoff = Date().addingTimeInterval(-7 * 86400)
         for (u, m) in files(within: 7 * 86400) {
-            let entries: [(String, Date, Int)]
+            let entries: [(String, Date, Int, String?)]
             if let c = cache[u.path], c.0 == m { entries = c.1 } else { entries = Self.usage(u); cache[u.path] = (m, entries) }
             let key = u.path.contains("/subagents/")
                 ? u.deletingLastPathComponent().deletingLastPathComponent().path + ".jsonl" : u.path
-            for (id, t, n) in entries { all[id] = (t, n); per[key, default: 0] += n }
+            for (id, t, n, model) in entries {
+                all[id] = (t, n, model)
+                per[key, default: 0] += n
+                if t > weekCutoff, let model { models[prettyModel(model), default: 0] += n }
+            }
         }
-        let b = Self.blocks(all.values.filter { $0.0 > Date().addingTimeInterval(-7 * 86400) })
+        let now = Date()
+        let entries = all.values.map { ($0.0, $0.1) }
+        let recent = entries.filter { $0.0 > now.addingTimeInterval(-7 * 86400) }
+        let b = Self.blocks(recent)
+        let grid = Self.activityGrid(entries, now: now)
         DispatchQueue.main.async { [self] in
             tokens = per
             week = b.week; peak = max(b.peak, 1)
             (block, blockEnd) = b.current.map { ($0.1, $0.0) } ?? (0, nil)
+            activity = grid
+            modelUsage = models.map { ModelTokenUsage(model: $0.key, tokens: $0.value) }.sorted { $0.tokens > $1.tokens }
         }
+    }
+
+    private func refreshAccountUsage() {
+        q.async { [weak self] in
+            guard let token = Self.oauthToken() else {
+                DispatchQueue.main.async { self?.accountUsageLoaded = true }
+                return
+            }
+            var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!, timeoutInterval: 12)
+            request.httpMethod = "GET"
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+            URLSession.shared.dataTask(with: request) { data, response, _ in
+                guard let data, (response as? HTTPURLResponse)?.statusCode == 200,
+                      let parsed = Self.parseAccountUsage(data) else {
+                    DispatchQueue.main.async { self?.accountUsageLoaded = true }
+                    return
+                }
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.accountSession = parsed.session
+                    self.accountWeek = parsed.week
+                    self.accountModels = parsed.models
+                    self.extraUsage = parsed.extra
+                    self.accountUsageLoaded = true
+                }
+            }.resume()
+        }
+    }
+
+    /// Claude Code keeps its OAuth credential in Keychain, with a file fallback for older installs.
+    private static func oauthToken() -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        if (try? process.run()) != nil {
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            if process.terminationStatus == 0, let token = token(from: data) { return token }
+        }
+        let file = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/.credentials.json")
+        return (try? Data(contentsOf: file)).flatMap(token(from:))
+    }
+
+    private static func token(from data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        let oauth = json["claudeAiOauth"] as? [String: Any] ?? json
+        return (oauth["accessToken"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    private static func parseAccountUsage(_ data: Data) -> (session: UsageWindow?, week: UsageWindow?, models: [UsageWindow], extra: ExtraUsage?)? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        func window(_ value: Any?, id: String, name: String) -> UsageWindow? {
+            guard let d = value as? [String: Any],
+                  let raw = (d["utilization"] as? NSNumber)?.doubleValue ?? (d["percent"] as? NSNumber)?.doubleValue else { return nil }
+            let percent = raw <= 1 ? raw * 100 : raw
+            let reset = (d["resets_at"] as? String).flatMap(parseDate)
+            return UsageWindow(id: id, name: name, percent: percent, resetsAt: reset)
+        }
+        let session = window(json["five_hour"], id: "session", name: "Current session")
+        let week = window(json["seven_day"], id: "week", name: "All models")
+        var models: [UsageWindow] = []
+        if let limits = json["limits"] as? [[String: Any]] {
+            for (index, item) in limits.enumerated() {
+                guard let display = ((item["scope"] as? [String: Any])?["model"] as? [String: Any])?["display_name"] as? String,
+                      let model = window(item, id: "model-\(index)", name: display) else { continue }
+                models.append(model)
+            }
+        }
+        if models.isEmpty {
+            for (key, name) in [("seven_day_opus", "Opus"), ("seven_day_sonnet", "Sonnet"), ("seven_day_haiku", "Haiku")] {
+                if let model = window(json[key], id: key, name: name) { models.append(model) }
+            }
+        }
+        let extra: ExtraUsage? = (json["extra_usage"] as? [String: Any]).map { d in
+            ExtraUsage(enabled: d["is_enabled"] as? Bool ?? false,
+                       used: (d["used_credits"] as? NSNumber)?.doubleValue,
+                       limit: (d["monthly_limit"] as? NSNumber)?.doubleValue,
+                       currency: d["currency"] as? String ?? "USD")
+        }
+        return (session, week, models, extra)
+    }
+
+    private static func parseDate(_ value: String) -> Date? {
+        let f = ISO8601DateFormatter()
+        if let date = f.date(from: value) { return date }
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f.date(from: value)
+    }
+
+    /// Count Claude usage messages in each local hour for the last seven calendar days.
+    static func activityGrid(_ entries: [(Date, Int)], now: Date = Date()) -> [[Int]] {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: now)
+        guard let first = cal.date(byAdding: .day, value: -6, to: today) else {
+            return Array(repeating: Array(repeating: 0, count: 24), count: 7)
+        }
+        var grid = Array(repeating: Array(repeating: 0, count: 24), count: 7)
+        for (date, _) in entries {
+            let day = cal.startOfDay(for: date)
+            guard let offset = cal.dateComponents([.day], from: first, to: day).day, (0..<7).contains(offset) else { continue }
+            grid[offset][cal.component(.hour, from: date)] += 1
+        }
+        return grid
     }
 
     /// Claude's 5h windows: a block starts at the hour of the first message after the previous block expired.
@@ -355,9 +515,9 @@ struct Agent: Identifiable {
     }()
 
     /// (message id, time, tokens) — input + cache writes + output; cache reads are excluded (they're ~free).
-    static func usage(_ u: URL) -> [(String, Date, Int)] {
+    static func usage(_ u: URL) -> [(String, Date, Int, String?)] {
         guard let data = try? Data(contentsOf: u), let text = String(data: data, encoding: .utf8) else { return [] }
-        var seen = Set<String>(), out: [(String, Date, Int)] = []
+        var seen = Set<String>(), out: [(String, Date, Int, String?)] = []
         for line in text.split(separator: "\n") where line.contains("\"usage\"") {
             guard let d = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
                   let msg = d["message"] as? [String: Any], let id = msg["id"] as? String,
@@ -365,7 +525,8 @@ struct Agent: Identifiable {
                   let t = (d["timestamp"] as? String).flatMap(iso.date(from:)),
                   seen.insert(id).inserted else { continue }
             let n = ["input_tokens", "cache_creation_input_tokens", "output_tokens"].reduce(0) { $0 + (us[$1] as? Int ?? 0) }
-            out.append((id, t, n))
+            let model = (msg["model"] as? String) ?? (d["model"] as? String)
+            out.append((id, t, n, model))
         }
         return out
     }

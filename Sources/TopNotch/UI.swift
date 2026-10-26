@@ -11,6 +11,7 @@ extension Color {
     static let ice = Color(red: 0.38, green: 0.84, blue: 1.0)
     static let violet = Color(red: 0.68, green: 0.58, blue: 1.0)
     static let jade = Color(red: 0.25, green: 0.88, blue: 0.80)  // firouzeh
+    static let claude = Color(red: 0.92, green: 0.52, blue: 0.38)
     static let volt = Color(red: 0.86, green: 1.0, blue: 0.36)
     static let tg = Color(red: 0.18, green: 0.68, blue: 0.95)
     static let wa = Color(red: 0.16, green: 0.85, blue: 0.42)
@@ -63,6 +64,7 @@ let symbols = Tab.allCases.map(\.icon) + [
     "heart.fill", "flame.fill", "eye", "figure.mind.and.body", "hand.raised.fingers.spread", "figure.stand", "drop.fill",
     "wind", "minus", "plus", "pause.fill", "forward.end.fill", "circle.fill",
     "hand.raised.fill", "hand.raised.fingers.spread.fill",
+    "questionmark.bubble.fill", "questionmark", "arrow.up.forward.app", "arrow.right", "link", "checkmark.seal.fill",
     "memorychip", "network", "arrow.down", "arrow.up", "internaldrive", "thermometer.medium", "clock",
     "music.note.list", "battery.100percent", "battery.75percent", "battery.50percent", "battery.25percent", "battery.0percent",
     "chevron.left", "chevron.right", "arrow.uturn.backward",
@@ -158,7 +160,7 @@ struct DotGrid: View {
 }
 
 struct NotchView: View {
-    let s: NotchState, music: Music, clip: Clip, agents: Agents, notifs: Notifs, stats: Stats
+    let s: NotchState, music: Music, clip: Clip, agents: Agents, notifs: Notifs, stats: Stats, bridge: Bridge
 
     var flare: CGFloat { s.open ? 14 : 7 }
     var lyricIsland: Bool { !s.open && music.island && music.playing && !music.lyrics.isEmpty }
@@ -198,7 +200,7 @@ struct NotchView: View {
 
             Group {
                 if s.open {
-                    Expanded(s: s, music: music, clip: clip, agents: agents, notifs: notifs, stats: stats)
+                    Expanded(s: s, music: music, clip: clip, agents: agents, notifs: notifs, stats: stats, bridge: bridge)
                         .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 0.92, anchor: .top)).animation(spring.delay(0.06)),
                                                 removal: .opacity.animation(.easeOut(duration: 0.12))))
                 } else {
@@ -242,9 +244,6 @@ struct Collapsed: View {
     @ViewBuilder var left: some View {
         do {
             HStack(spacing: 10) {
-                let yours = agents.live.filter { $0.state == .wait }.count
-                if agents.live.count > yours { count("sparkle", agents.live.count - yours, .neon, pulse: true) }
-                if yours > 0 { count("hand.wave.fill", yours, .amber, pulse: false) }
                 if music.playing {
                     HStack(spacing: 5) {
                         if let a = music.art {
@@ -353,7 +352,7 @@ struct Bars: View {
 // MARK: - Expanded
 
 struct Expanded: View {
-    let s: NotchState, music: Music, clip: Clip, agents: Agents, notifs: Notifs, stats: Stats
+    let s: NotchState, music: Music, clip: Clip, agents: Agents, notifs: Notifs, stats: Stats, bridge: Bridge
     @State private var boot = SMAppService.mainApp.status == .enabled
     @Namespace private var ns
 
@@ -398,7 +397,7 @@ struct Expanded: View {
 
             Group {
                 switch s.tab {
-                case .agents: AgentsPane(agents: agents)
+                case .agents: ClaudeMenuHint()
                 case .music: MusicPane(m: music)
                 case .clip: ClipPane(clip: clip)
                 case .notes: NotesPane()
@@ -470,11 +469,32 @@ func ago(_ d: Date) -> String {
 // MARK: - Agents
 
 struct AgentsPane: View {
-    let agents: Agents
+    let agents: Agents, bridge: Bridge
+    var displayAsks = true
+    var displayUsage = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            limits
+            if displayAsks, !bridge.asks.isEmpty {
+                ScrollView {
+                    VStack(spacing: 6) {
+                        ForEach(bridge.asks) { a in
+                            AskCard(a: a, bridge: bridge, agent: agents.live.first { $0.id == a.session })
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
+                    }
+                }
+                .scrollIndicators(.never)
+            } else {
+                list
+            }
+        }
+    }
+
+    @ViewBuilder var list: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if displayUsage { limits }
+            if !bridge.connected { connect }
             let live = agents.live.filter { $0.state != .wait }, yours = agents.live.filter { $0.state == .wait }
             if agents.live.isEmpty {
                 Empty(icon: "moon.zzz", title: "No agents running", sub: "go touch grass")
@@ -502,7 +522,9 @@ struct AgentsPane: View {
             }
             .padding(.top, 4).padding(.horizontal, 2)
             ForEach(list) { a in
-                Row(a: a, tok: agents.tokens[a.id] ?? 0) { withAnimation(spring) { agents.dismiss([a.id]) } }
+                let h = bridge.host(for: a)
+                Row(a: a, tok: agents.tokens[a.id] ?? 0, host: h?.name,
+                    jump: h.map { h in { bridge.jump(h, cwd: a.cwd) } }) { withAnimation(spring) { agents.dismiss([a.id]) } }
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
         }
@@ -527,10 +549,32 @@ struct AgentsPane: View {
                 }
             }
             stat("calendar", fmtTok(agents.week), "7 days", .fg2)
+            if bridge.connected {
+                Button { bridge.connect(false) } label: {
+                    Image(systemName: "link").font(.system(size: 11, weight: .bold)).foregroundStyle(Color.neon)
+                }
+                .buttonStyle(Press())
+                .help("disable menu bar approvals and return prompts to Claude Code")
+            }
         }
         .padding(.horizontal, 12).padding(.vertical, 9)
         .card()
         .help("tokens (in + cache writes + out) in the current 5h window, vs your busiest window this week")
+    }
+
+    var connect: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "hand.raised.fill").font(.system(size: 13)).foregroundStyle(Color.amber)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Approve, deny and answer Claude from the menu bar").font(sans(12, .semibold))
+                Caps(text: bridge.setupError ?? "adds TopNotch hooks to ~/.claude/settings.json", color: bridge.setupError == nil ? .fg3 : .hot)
+            }
+            Spacer()
+            Button { bridge.connect(true) } label: { Pill(icon: "link", text: "connect", color: .neon) }
+                .buttonStyle(Press())
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .card(.amber)
     }
 
     func stat(_ icon: String, _ value: String, _ label: String, _ c: Color) -> some View {
@@ -541,6 +585,20 @@ struct AgentsPane: View {
             }
             Caps(text: label)
         }
+    }
+}
+
+struct ClaudeMenuHint: View {
+    var body: some View {
+        VStack(spacing: 9) {
+            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                .font(.system(size: 22, weight: .medium)).foregroundStyle(Color.claude)
+            Text("Claude Code is in the menu bar")
+                .font(sans(14, .semibold)).foregroundStyle(Color.fg)
+            Caps(text: "open the terminal icon beside Wi-Fi for sessions and approvals")
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -564,6 +622,8 @@ struct Meter: View {
 
 struct Row: View {
     let a: Agent, tok: Int
+    var host: String?
+    var jump: (() -> Void)?
     var dismiss: () -> Void = {}
     @State private var hover = false
 
@@ -600,7 +660,9 @@ struct Row: View {
                 .frame(width: 20, height: 20)
                 .background(color.opacity(0.15), in: Circle())
             Text(a.project).font(sans(12, .semibold)).foregroundStyle(Color.fg).lineLimit(1)
-                .frame(width: 104, alignment: .leading)
+                .frame(maxWidth: 104, alignment: .leading)
+                .fixedSize(horizontal: true, vertical: false)
+            AgentTag(ai: a.ai, model: a.model, host: host)
             Image(systemName: tool.icon).font(.system(size: 9)).foregroundStyle(Color.fg3)
             Text(tool.text).font(mono(10)).foregroundStyle(Color.fg2).lineLimit(1).truncationMode(.tail)
             Spacer(minLength: 6)
@@ -612,6 +674,14 @@ struct Row: View {
                 .foregroundStyle(Color.ice)
             }
             Text(fmtTok(tok)).font(mono(10, .semibold)).foregroundStyle(Color.fg2)
+            if hover, let jump {
+                Button(action: jump) {
+                    Image(systemName: "arrow.up.forward.app").font(.system(size: 9, weight: .bold)).foregroundStyle(Color.fg2)
+                        .frame(width: 26, height: 18).background(Color.white.opacity(0.08), in: Capsule())
+                }
+                .buttonStyle(Press())
+                .help("jump to this session\(host.map { " in " + $0 } ?? "")")
+            }
             if hover {
                 Button(action: dismiss) {
                     Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Color.fg2)
@@ -626,7 +696,145 @@ struct Row: View {
         .padding(.horizontal, 8).padding(.vertical, 5)
         .card(color, hover: hover)
         .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hover = h } }
-        .help("\(stateLabel): \(a.detail)")
+        .help("\(stateLabel): \(a.detail)\(a.branch.map { "\nbranch: " + $0 } ?? "")")
+    }
+}
+
+/// "CLAUDE · OPUS 5.5 · ITERM": which AI, which model, which app it's running in.
+struct AgentTag: View {
+    let ai: String, model: String?, host: String?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle().fill(Color.claude).frame(width: 5, height: 5)
+            Text(ai.uppercased()).foregroundStyle(Color.claude)
+            if let model { Text(prettyModel(model).uppercased()).foregroundStyle(Color.fg2) }
+            if let host { Text("· " + host.uppercased()).foregroundStyle(Color.fg3) }
+        }
+        .font(mono(8, .bold)).kerning(0.6).lineLimit(1)
+        .padding(.horizontal, 6).frame(height: 16)
+        .background(Color.claude.opacity(0.08), in: Capsule())
+        .overlay(Capsule().stroke(Color.claude.opacity(0.3), lineWidth: 0.5))
+        .fixedSize()
+    }
+}
+
+/// A session blocked on you: allow / always / deny (or tell Claude what to do instead), or pick an answer.
+struct AskCard: View {
+    let a: Ask, bridge: Bridge, agent: Agent?
+    @State private var note = ""
+    @State private var step = 0
+    @State private var picked: [String: [String]] = [:]  // question → chosen labels (or your own words)
+    @State private var other = ""
+
+    var tint: Color { a.kind == .question ? .ice : .amber }
+    var host: Host? { a.host ?? bridge.hosts[a.session] }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Image(systemName: a.kind == .question ? "questionmark.bubble.fill" : "hand.raised.fill")
+                    .font(.system(size: 11, weight: .bold)).foregroundStyle(tint).symbolEffect(.pulse)
+                Text(a.project).font(sans(12, .semibold)).lineLimit(1)
+                AgentTag(ai: "Claude", model: agent?.model, host: host?.name)
+                if let b = agent?.branch { Caps(text: b) }
+                Spacer(minLength: 4)
+                TimelineView(.periodic(from: .now, by: 1)) { _ in Caps(text: ago(a.at)) }
+                Button { bridge.terminal(a) } label: { Pill(icon: "arrow.up.forward.app", text: "terminal", color: .fg2) }
+                    .help("answer in \(host?.name ?? "the terminal") instead")
+            }
+            if a.kind == .permission { permission } else { question }
+        }
+        .padding(10)
+        .card(tint, hover: true)
+        .buttonStyle(Press())
+    }
+
+    var permission: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(a.tool).font(mono(10, .bold)).foregroundStyle(Color.amber)
+                Text(a.summary).font(mono(11)).foregroundStyle(Color.fg).lineLimit(3).truncationMode(.middle)
+            }
+            .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .help(a.summary)
+            HStack(spacing: 6) {
+                Button { bridge.allow(a) } label: { Pill(icon: "checkmark", text: "allow", color: .neon) }
+                if !a.suggestions.isEmpty {
+                    Button { bridge.allow(a, always: true) } label: { Pill(icon: "checkmark.seal.fill", text: "always", color: .ice) }
+                        .help("allow, and don't ask again for this kind of call")
+                }
+                Button { bridge.deny(a) } label: { Pill(icon: "xmark", text: "deny", color: .hot) }
+                field($note, "or tell Claude what to do instead ↩") { bridge.deny(a, note) }
+            }
+        }
+    }
+
+    var question: some View {
+        let q = a.questions[min(step, a.questions.count - 1)]
+        let sel = picked[q.text] ?? []
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                if !q.header.isEmpty { Pill(icon: "questionmark", text: q.header, color: .ice) }
+                if a.questions.count > 1 { Caps(text: "\(step + 1)/\(a.questions.count)") }
+                Text(q.text).font(sans(12, .medium)).lineLimit(2)
+            }
+            HStack(spacing: 5) {
+                ForEach(q.options, id: \.label) { o in
+                    let on = sel.contains(o.label)
+                    Button { choose(q, o.label) } label: {
+                        Text(o.label).font(sans(11, .semibold)).lineLimit(1)
+                            .foregroundStyle(on ? Color.black : Color.fg)
+                            .padding(.horizontal, 10).frame(height: 24)
+                            .background(on ? Color.ice : Color.white.opacity(0.07), in: Capsule())
+                            .overlay(Capsule().stroke(Color.ice.opacity(0.35), lineWidth: 0.5))
+                    }
+                    .help(o.info)
+                }
+                if q.multi {
+                    Button { advance() } label: { Pill(icon: "arrow.right", text: last ? "send" : "next", color: sel.isEmpty ? .fg3 : .neon) }
+                        .disabled(sel.isEmpty)
+                }
+            }
+            field($other, "or type your own answer ↩") {
+                picked[q.text] = (q.multi ? sel : []) + [other]
+                advance()
+            }
+        }
+    }
+
+    var last: Bool { step + 1 >= a.questions.count }
+
+    func field(_ text: Binding<String>, _ hint: String, submit: @escaping () -> Void) -> some View {
+        TextField("", text: text, prompt: Text(hint).foregroundStyle(Color.fg3))
+            .textFieldStyle(.plain).font(sans(12))
+            .onSubmit { if !text.wrappedValue.trimmingCharacters(in: .whitespaces).isEmpty { submit() } }
+            .padding(.horizontal, 9).frame(height: 22)
+            .background(Color.white.opacity(0.05), in: Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 0.5))
+    }
+
+    func choose(_ q: Question, _ label: String) {
+        var sel = picked[q.text] ?? []
+        if q.multi {
+            if let i = sel.firstIndex(of: label) { sel.remove(at: i) } else { sel.append(label) }
+            picked[q.text] = sel
+        } else {
+            picked[q.text] = [label]
+            advance()
+        }
+    }
+
+    func advance() {
+        if !last { withAnimation(spring) { step += 1; other = "" }; return }
+        var answers: [String: String] = [:]
+        for q in a.questions {
+            let sel = picked[q.text] ?? []
+            let ordered = q.options.map(\.label).filter(sel.contains) + sel.filter { s in !q.options.contains { $0.label == s } }
+            answers[q.text] = ordered.joined(separator: ", ")
+        }
+        bridge.answer(a, answers)
     }
 }
 

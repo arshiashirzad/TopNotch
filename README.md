@@ -2,7 +2,7 @@
 
 A geeky Dynamic Island for the MacBook notch. Hover the notch and it springs open into a black HUD panel.
 
-- **Agents:** live Claude Code sessions (running / thinking / your turn), the current tool, tokens, and a 5-hour usage meter, all read from `~/.claude/projects`. Plays a chime when an agent finishes.
+- **Claude Code:** a menu bar item beside Wi-Fi and Control Center shows sessions, approvals, current usage, model limits, credits and a seven-day hourly activity grid. Allow, deny or answer requests, then jump back to the right terminal. Session details are read locally; account usage uses Claude Code's OAuth credential and usage endpoint.
 - **Music:** Apple Music and Spotify controls, album art and seeking, plus time-synced lyrics from [LRCLIB](https://lrclib.net). The line being sung right now can show big under the notch.
 - **Clipboard:** history of what you copy. Password-manager copies are skipped, and nothing is stored on disk.
 - **Notes:** a scratchpad that saves automatically.
@@ -34,6 +34,7 @@ This builds a release binary, wraps it in `/Applications/TopNotch.app`, signs it
 | Feature | Permission |
 |---|---|
 | Music control | Automation → Music / Spotify (asked on first use) |
+| Jump to Claude session | Automation → the session's terminal app (asked on first use) |
 | Messages (history) | Full Disk Access (reads Notification Center's database) |
 | Messages (instant) | Accessibility (reads the banner while it's on screen) |
 
