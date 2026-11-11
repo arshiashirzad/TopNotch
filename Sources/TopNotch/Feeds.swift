@@ -267,6 +267,7 @@ struct ExtraUsage {
     @ObservationIgnored private var cache: [String: (Date, [(String, Date, Int, String?)])] = [:]  // q only
     @ObservationIgnored private let q = DispatchQueue(label: "topnotch.agents", qos: .utility)
     static let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
+    static let codexRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/sessions")
 
     init() {
         Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.q.async { self?.scanLive() } }
@@ -277,8 +278,12 @@ struct ExtraUsage {
     }
 
     private func files(within s: TimeInterval) -> [(URL, Date)] {
+        files(at: Self.root, within: s)
+    }
+
+    private func files(at root: URL, within s: TimeInterval) -> [(URL, Date)] {
         let cut = Date().addingTimeInterval(-s)
-        let en = FileManager.default.enumerator(at: Self.root, includingPropertiesForKeys: [.contentModificationDateKey])
+        let en = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey])
         return (en?.allObjects as? [URL] ?? []).compactMap { u in
             guard u.pathExtension == "jsonl",
                   let m = try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
@@ -303,6 +308,19 @@ struct ExtraUsage {
             out.append(Agent(id: u.path, project: name, state: state, detail: detail, updated: m, subs: subs,
                              cwd: cwd, model: t.meta.model, branch: t.meta.branch, entry: t.meta.entry))
         }
+        for (u, m) in files(at: Self.codexRoot, within: 30 * 60) {
+            guard u.pathExtension == "jsonl", let t = Self.codexTail(u) else { continue }
+            let age = Date().timeIntervalSince(m)
+            guard age <= 30 * 60 else { continue }
+            let state: AState = t.complete ? .wait : t.tool == nil ? .think : .run
+            if state == .think && age > 5 * 60 { continue }
+            let name = t.cwd.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Codex"
+            var agent = Agent(id: "codex:" + u.path, project: name, state: state,
+                              detail: t.complete ? "turn complete" : t.tool ?? "working…", updated: m, subs: 0,
+                              cwd: t.cwd, model: t.model, branch: t.branch, entry: t.entry)
+            agent.ai = "Codex"
+            out.append(agent)
+        }
         out.sort { $0.updated > $1.updated }
         DispatchQueue.main.async { [self] in
             for a in out where a.state == .wait && prev[a.id].map({ $0 != .wait }) == true { onDone?(a.project) }
@@ -310,6 +328,60 @@ struct ExtraUsage {
             all = out
             publish()
         }
+    }
+
+    /// Read Codex's local rollout log, keeping only the last turn's state and tool summary.
+    static func codexTail(_ url: URL) -> (cwd: String?, model: String?, branch: String?, entry: String?, complete: Bool, tool: String?)? {
+        guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? h.close() }
+        let size = (try? h.seekToEnd()) ?? 0
+        let data: Data
+        if size > 262_144 {
+            try? h.seek(toOffset: 0)
+            let header = (try? h.read(upToCount: 16_384)) ?? Data()
+            try? h.seek(toOffset: size - 262_144)
+            let tail = (try? h.readToEnd()) ?? Data()
+            data = header + Data("\n".utf8) + tail
+        } else {
+            try? h.seek(toOffset: 0)
+            guard let all = try? h.readToEnd() else { return nil }
+            data = all
+        }
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        var cwd: String?, model: String?, branch: String?, entry: String?
+        var started = false, complete = true, pending: (id: String, summary: String)?
+        for line in text.split(separator: "\n") {
+            guard let row = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
+            let payload = row["payload"] as? [String: Any] ?? [:]
+            switch row["type"] as? String {
+            case "session_meta":
+                cwd = payload["cwd"] as? String
+                entry = payload["source"] as? String
+            case "turn_context":
+                model = model ?? payload["model"] as? String
+            case "event_msg":
+                if payload["type"] as? String == "task_started" { started = true; complete = false; pending = nil }
+                if payload["type"] as? String == "task_complete" { complete = true; pending = nil }
+            case "response_item":
+                let type = payload["type"] as? String ?? ""
+                if type == "custom_tool_call" || type == "function_call" {
+                    let id = payload["call_id"] as? String ?? payload["id"] as? String ?? UUID().uuidString
+                    let name = payload["name"] as? String ?? "tool"
+                    let input = payload["input"] as? String ?? (payload["arguments"] as? String ?? "")
+                    let short = input.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+                    pending = (id, "\(name) › \(String(short.prefix(110)))")
+                } else if type == "custom_tool_call_output" || type == "function_call_output" {
+                    let id = payload["call_id"] as? String
+                    if id == pending?.id { pending = nil }
+                }
+            default: break
+            }
+            if let meta = payload["git"] as? [String: Any], branch == nil {
+                branch = meta["branch"] as? String
+            }
+        }
+        guard started || model != nil else { return nil }
+        return (cwd, model, branch, entry, complete, pending?.summary)
     }
 
     /// Status from the last real message in the session log, plus which model, branch and front end it's on.

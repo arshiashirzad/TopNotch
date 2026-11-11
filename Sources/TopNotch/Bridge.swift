@@ -77,6 +77,7 @@ struct Ask: Identifiable {
         switch a.entry {
         case "claude-vscode": return Host(bundle: "com.microsoft.VSCode", tty: nil)
         case "claude-desktop": return Host(bundle: "com.anthropic.claudefordesktop", tty: nil)
+        case "vscode", "codex-vscode": return Host(bundle: "com.microsoft.VSCode", tty: nil)
         default: return nil
         }
     }

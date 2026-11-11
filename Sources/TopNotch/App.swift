@@ -13,7 +13,7 @@ import SwiftUI
     }
 }
 
-enum Tab: String, CaseIterable { case agents = "ai", music, clip, notes, cal, msgs, sys }
+enum Tab: String, CaseIterable { case agents = "ai", music, clip, notes, cal, github, msgs, sys }
 
 /// A few seconds of news: the island drops into a card. Hovering it opens `tab`.
 struct Flash: Equatable {

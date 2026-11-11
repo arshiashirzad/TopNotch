@@ -2,12 +2,13 @@
 
 A geeky Dynamic Island for the MacBook notch. Hover the notch and it springs open into a black HUD panel.
 
-- **Claude Code:** in the notch: live sessions and ones waiting on you, with Allow, Deny and answer cards for Claude's prompts, then a jump back to the right terminal. Shows your 5-hour and weekly limits, with model limits, credits and a seven-day activity grid one click away. Session details are read locally; account usage uses Claude Code's OAuth credential and usage endpoint.
+- **AI sessions:** live Claude Code and Codex sessions, with their project, model and current activity. Claude Code prompts can be approved or answered from the notch; Claude usage limits and activity are also available.
 - **Music:** Apple Music and Spotify controls, album art and seeking, plus time-synced lyrics from [LRCLIB](https://lrclib.net). The line being sung right now can show big under the notch.
 - **Drop shelf:** a liquid tab on the right screen edge, above the Dock. Drag files, images, links or text near it and it swells into a drop target; drag them back out into any app, or share, copy and reveal them. New screenshots pop out of it with a thumbnail to drag into a chat, copy or delete.
 - **Clipboard:** history of what you copy. Password-manager copies are skipped, and nothing is stored on disk.
 - **Notes:** a scratchpad that saves automatically.
 - **Calendar:** the Persian (Solar Hijri) calendar. It shows today in Persian digits next to the clock and a Saturday-first month grid with the Gregorian date under each day. Fridays and the fixed-date official holidays are marked, and it counts down to Nowruz.
+- **GitHub:** a last-year contribution calendar for a GitHub username, showing public activity without signing in.
 
 - **System:** live CPU, memory and network with two-minute sparklines, battery (time left, cycles, health, charger watts), free disk, thermal pressure, uptime and the top processes. The notch flashes when you plug in or unplug, when the battery drops to 20/10/5%, and when the Mac runs hot; a pegged CPU shows on the closed notch.
 - **Messages:** WhatsApp, Telegram and Slack notifications show up instantly as a card on the notch, with each app's unread badge on the closed notch.

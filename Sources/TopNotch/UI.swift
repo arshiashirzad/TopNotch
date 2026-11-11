@@ -35,13 +35,14 @@ extension Tab {
         case .clip: "doc.on.clipboard.fill"
         case .notes: "square.and.pencil"
         case .cal: "calendar"
+        case .github: "chevron.left.forwardslash.chevron.right"
         case .msgs: "bubble.left.and.bubble.right.fill"
         case .sys: "cpu"
         }
     }
     var label: String { self == .agents ? "agents" : rawValue }
     var accent: Color {
-        switch self { case .agents: .neon; case .music: .hot; case .clip: .ice; case .notes: .amber; case .cal: .jade; case .msgs: .violet; case .sys: .volt }
+        switch self { case .agents: .neon; case .music: .hot; case .clip: .ice; case .notes: .amber; case .cal: .jade; case .github: .neon; case .msgs: .violet; case .sys: .volt }
     }
 }
 
@@ -406,6 +407,7 @@ struct Expanded: View {
                 case .clip: ClipPane(clip: clip)
                 case .notes: NotesPane()
                 case .cal: CalPane()
+                case .github: GitHubCalendarPane()
                 case .msgs: MsgsPane(n: notifs)
                 case .sys: SysPane(st: stats)
                 }
@@ -653,7 +655,7 @@ struct Row: View {
         let parts = a.detail.components(separatedBy: " › ")
         guard parts.count > 1 else { return ("text.bubble", a.detail) }
         let icon = switch parts[0] {
-        case "Bash": "terminal"
+        case "Bash", "exec": "terminal"
         case "Read": "doc.text"
         case "Edit", "Write", "MultiEdit", "NotebookEdit": "pencil"
         case "Grep", "Glob": "magnifyingglass"
@@ -715,18 +717,19 @@ struct Row: View {
 /// "CLAUDE · OPUS 5.5 · ITERM": which AI, which model, which app it's running in.
 struct AgentTag: View {
     let ai: String, model: String?, host: String?
+    var tint: Color { ai == "Codex" ? .ice : .claude }
 
     var body: some View {
         HStack(spacing: 4) {
-            Circle().fill(Color.claude).frame(width: 5, height: 5)
-            Text(ai.uppercased()).foregroundStyle(Color.claude)
+            Circle().fill(tint).frame(width: 5, height: 5)
+            Text(ai.uppercased()).foregroundStyle(tint)
             if let model { Text(prettyModel(model).uppercased()).foregroundStyle(Color.fg2) }
             if let host { Text("· " + host.uppercased()).foregroundStyle(Color.fg3) }
         }
         .font(mono(8, .bold)).kerning(0.6).lineLimit(1)
         .padding(.horizontal, 6).frame(height: 16)
-        .background(Color.claude.opacity(0.08), in: Capsule())
-        .overlay(Capsule().stroke(Color.claude.opacity(0.3), lineWidth: 0.5))
+        .background(tint.opacity(0.08), in: Capsule())
+        .overlay(Capsule().stroke(tint.opacity(0.3), lineWidth: 0.5))
         .fixedSize()
     }
 }
